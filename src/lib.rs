@@ -85,6 +85,7 @@ impl Vm {
             }),
         }
     }
+
     fn run(&mut self) -> Result<Val> {
         let mut current_frame = self.stack_frames.pop().ok_or(Error::StackUnderflow)?;
         loop {
@@ -256,8 +257,7 @@ impl Vm {
         current_frame: &mut StackFrame,
         func: Func,
         arg_count: usize,
-    ) -> Result<Instruction> {
-        let instruction = func.instructions()[0];
+    ) -> Result<()> {
         let stack_start = self.stack.len() - arg_count;
         if func.args() != arg_count {
             return Err(Error::WrongArgCount {
@@ -274,7 +274,7 @@ impl Vm {
             },
         );
         self.stack_frames.push(caller_frame);
-        Ok(instruction)
+        Ok(())
     }
 }
 
