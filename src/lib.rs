@@ -85,6 +85,7 @@ impl Vm {
             }),
         }
     }
+
     fn run(&mut self) -> Result<Val> {
         let mut current_frame = self.stack_frames.pop().ok_or(Error::StackUnderflow)?;
         loop {
@@ -256,8 +257,7 @@ impl Vm {
         current_frame: &mut StackFrame,
         func: Func,
         arg_count: usize,
-    ) -> Result<Instruction> {
-        let instruction = func.instructions()[0];
+    ) -> Result<()> {
         let stack_start = self.stack.len() - arg_count;
         if func.args() != arg_count {
             return Err(Error::WrongArgCount {
@@ -274,7 +274,7 @@ impl Vm {
             },
         );
         self.stack_frames.push(caller_frame);
-        Ok(instruction)
+        Ok(())
     }
 }
 
@@ -344,6 +344,24 @@ pub fn make_fib() -> Val {
             Instruction::Return,            // 10: return fib(n-1)+fib(n-2)
             load_n,                         // 11: [n, n]  -- base case (n < 2)
             Instruction::Return,            // 12: return n
+        ],
+        vec![],
+    )
+    .into()
+}
+
+pub fn make_adder() -> Val {
+    Func::new(
+        4,
+        vec![
+            Instruction::LoadLocal(0),
+            Instruction::LoadLocal(1),
+            Instruction::Binop(Binop::Add),
+            Instruction::LoadLocal(2),
+            Instruction::LoadLocal(3),
+            Instruction::Binop(Binop::Add),
+            Instruction::Binop(Binop::Add),
+            Instruction::Return,
         ],
         vec![],
     )
