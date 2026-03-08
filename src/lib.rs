@@ -39,17 +39,6 @@ pub struct StackFrame {
     pub(crate) func: Func,
 }
 
-impl StackFrame {
-    #[inline(always)]
-    pub(crate) fn advance_instruction_fn(
-        &mut self,
-    ) -> (fn(&mut Vm, StackFrame, u8) -> Result<Val>, u8) {
-        let (func, data) = self.func.instruction_fn(self.instruction_idx);
-        self.instruction_idx += 1;
-        (func, data)
-    }
-}
-
 impl Default for Vm {
     fn default() -> Self {
         Self::new()
@@ -100,9 +89,11 @@ impl Vm {
     }
 
     fn run(&mut self) -> Result<Val> {
-        let mut current_frame = self.stack_frames.pop().ok_or(Error::StackUnderflow)?;
-        let (fn_ptr, data) = current_frame.advance_instruction_fn();
-        fn_ptr(self, current_frame, data)
+        let current_frame = self.stack_frames.pop().ok_or(Error::StackUnderflow)?;
+        let fn_ptr = current_frame
+            .func
+            .instruction(current_frame.instruction_idx);
+        fn_ptr(self, current_frame)
     }
 }
 

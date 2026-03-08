@@ -2,6 +2,8 @@ use std::rc::Rc;
 
 use crate::{Error, Result, StackFrame, Val, Vm};
 
+type InstructionFn = fn(&mut Vm, StackFrame) -> Result<Val>;
+
 /// A reference-counted function containing bytecode and constants.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Func(Rc<FuncInner>);
@@ -17,38 +19,17 @@ impl Func {
         let mut data = Vec::new();
         for instruction in instructions {
             let (func, d) = match instruction {
-                Instruction::Eval(n) => (eval_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>, n),
-                Instruction::EvalRecursive(n) => (
-                    eval_recursive_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    n,
-                ),
-                Instruction::LoadInt(x) => (
-                    load_int_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    x as u8,
-                ),
-                Instruction::LoadConst(idx) => (
-                    load_const_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    idx,
-                ),
-                Instruction::LoadLocal(idx) => (
-                    load_local_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    idx,
-                ),
-                Instruction::SetLocal(idx) => (
-                    set_local_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    idx,
-                ),
-                Instruction::JumpIf(n) => (
-                    jump_if_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    n as u8,
-                ),
-                Instruction::Jump(n) => (
-                    jump_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    n as u8,
-                ),
-                Instruction::Return => (return_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>, 0),
+                Instruction::Eval(n) => (eval_fn as InstructionFn, n),
+                Instruction::EvalRecursive(n) => (eval_recursive_fn as InstructionFn, n),
+                Instruction::LoadInt(x) => (load_int_fn as InstructionFn, x as u8),
+                Instruction::LoadConst(idx) => (load_const_fn as InstructionFn, idx),
+                Instruction::LoadLocal(idx) => (load_local_fn as InstructionFn, idx),
+                Instruction::SetLocal(idx) => (set_local_fn as InstructionFn, idx),
+                Instruction::JumpIf(n) => (jump_if_fn as InstructionFn, n as u8),
+                Instruction::Jump(n) => (jump_fn as InstructionFn, n as u8),
+                Instruction::Return => (return_fn as InstructionFn, 0),
                 Instruction::Binop(op) => {
-                    let f: fn(&mut Vm, StackFrame, u8) -> Result<Val> = match op {
+                    let f: InstructionFn = match op {
                         Binop::Add => binop_add_fn,
                         Binop::Sub => binop_sub_fn,
                         Binop::Mul => binop_mul_fn,
@@ -62,21 +43,12 @@ impl Func {
                     };
                     (f, 0)
                 }
-                Instruction::AddN(n) => (add_n_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>, n as u8),
-                Instruction::LessThan(n) => (less_than_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>, n as u8),
-                Instruction::GreaterThan(n) => (
-                    greater_than_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    n as u8,
-                ),
-                Instruction::Equal(n) => (
-                    equal_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    n as u8,
-                ),
-                Instruction::StringLength => (
-                    string_length_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    0,
-                ),
-                Instruction::Dup(n) => (dup_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>, n),
+                Instruction::AddN(n) => (add_n_fn as InstructionFn, n as u8),
+                Instruction::LessThan(n) => (less_than_fn as InstructionFn, n as u8),
+                Instruction::GreaterThan(n) => (greater_than_fn as InstructionFn, n as u8),
+                Instruction::Equal(n) => (equal_fn as InstructionFn, n as u8),
+                Instruction::StringLength => (string_length_fn as InstructionFn, 0),
+                Instruction::Dup(n) => (dup_fn as InstructionFn, n),
             };
             funcs.push(func);
             data.push(d);
@@ -94,12 +66,14 @@ impl Func {
         self.0.arg_count
     }
 
+    /// Get the instruction data at the given index.
+    pub(crate) fn instruction_data(&self, idx: usize) -> u8 {
+        self.0.data[idx]
+    }
+
     /// Get the instruction at the given index.
-    pub(crate) fn instruction_fn(
-        &self,
-        idx: usize,
-    ) -> (fn(&mut Vm, StackFrame, u8) -> Result<Val>, u8) {
-        (self.0.funcs[idx], self.0.data[idx])
+    pub(crate) fn instruction(&self, idx: usize) -> InstructionFn {
+        self.0.funcs[idx]
     }
 
     /// Constant values referenced by `LoadConst` instructions.
@@ -111,7 +85,7 @@ impl Func {
 #[derive(Debug, PartialEq)]
 struct FuncInner {
     arg_count: usize,
-    funcs: Vec<fn(&mut Vm, StackFrame, u8) -> Result<Val>>,
+    funcs: Vec<InstructionFn>,
     data: Vec<u8>,
     constants: Vec<Val>,
 }
@@ -182,9 +156,9 @@ pub enum Instruction {
     Dup(u8),
 }
 
-pub(crate) fn eval_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<Val> {
+pub(crate) fn eval_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
+    let arg_count = frame.func.instruction_data(frame.instruction_idx) as usize;
     let func_val = vm.stack.pop().ok_or(Error::StackUnderflow)?;
-    let arg_count = data as usize;
     let stack_start = vm.stack.len() - arg_count;
     match func_val {
         Val::Func(func) => {
@@ -195,13 +169,13 @@ pub(crate) fn eval_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<Va
                 });
             }
             vm.stack_frames.push(frame);
-            let mut new_frame = StackFrame {
+            let new_frame = StackFrame {
                 stack_start,
                 instruction_idx: 0,
                 func,
             };
-            let (fn_ptr, data) = new_frame.advance_instruction_fn();
-            become fn_ptr(vm, new_frame, data);
+            let fn_ptr = new_frame.func.instruction(0);
+            become fn_ptr(vm, new_frame);
         }
         Val::NativeFunc(nf) => {
             if vm.stack.len() < arg_count {
@@ -210,8 +184,9 @@ pub(crate) fn eval_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<Va
             let result = (nf.0)(&vm.stack[stack_start..])?;
             vm.stack.truncate(stack_start);
             vm.stack.push(result);
-            let (fn_ptr, data) = frame.advance_instruction_fn();
-            become fn_ptr(vm, frame, data);
+            frame.instruction_idx += 1;
+            let fn_ptr = frame.func.instruction(frame.instruction_idx);
+            become fn_ptr(vm, frame);
         }
         v => {
             return Err(Error::WrongType {
@@ -222,8 +197,8 @@ pub(crate) fn eval_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<Va
     }
 }
 
-pub(crate) fn eval_recursive_fn(vm: &mut Vm, frame: StackFrame, data: u8) -> Result<Val> {
-    let arg_count = data as usize;
+pub(crate) fn eval_recursive_fn(vm: &mut Vm, frame: StackFrame) -> Result<Val> {
+    let arg_count = frame.func.instruction_data(frame.instruction_idx) as usize;
     let func = frame.func.clone();
     let stack_start = vm.stack.len() - arg_count;
     if func.args() != arg_count {
@@ -233,58 +208,70 @@ pub(crate) fn eval_recursive_fn(vm: &mut Vm, frame: StackFrame, data: u8) -> Res
         });
     }
     vm.stack_frames.push(frame);
-    let mut new_frame = StackFrame {
+    let new_frame = StackFrame {
         stack_start,
         instruction_idx: 0,
         func,
     };
-    let (fn_ptr, data) = new_frame.advance_instruction_fn();
-    become fn_ptr(vm, new_frame, data);
+    let fn_ptr = new_frame.func.instruction(0);
+    become fn_ptr(vm, new_frame);
 }
 
-pub(crate) fn load_int_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<Val> {
+pub(crate) fn load_int_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
+    let data = frame.func.instruction_data(frame.instruction_idx);
     vm.stack.push((data as i8 as i64).into());
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn load_const_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<Val> {
+pub(crate) fn load_const_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
+    let data = frame.func.instruction_data(frame.instruction_idx);
     let val = frame.func.constants()[data as usize].clone();
     vm.stack.push(val);
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn load_local_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<Val> {
+pub(crate) fn load_local_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
+    let data = frame.func.instruction_data(frame.instruction_idx);
     let val = vm.stack[frame.stack_start + data as usize].clone();
     vm.stack.push(val);
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn set_local_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<Val> {
+pub(crate) fn set_local_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
+    let data = frame.func.instruction_data(frame.instruction_idx);
     let val = vm.stack.pop().ok_or(Error::StackUnderflow)?;
     vm.stack[frame.stack_start + data as usize] = val;
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn jump_if_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<Val> {
+pub(crate) fn jump_if_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
+    let data = frame.func.instruction_data(frame.instruction_idx);
     let is_truthy = vm.stack.pop().ok_or(Error::StackUnderflow)?.is_truthy();
     if is_truthy {
         frame.instruction_idx = (frame.instruction_idx as isize + data as i8 as isize) as usize;
     }
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn jump_fn(_vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<Val> {
+pub(crate) fn jump_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
+    let data = frame.func.instruction_data(frame.instruction_idx);
     frame.instruction_idx = (frame.instruction_idx as isize + data as i8 as isize) as usize;
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(_vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn return_fn(vm: &mut Vm, frame: StackFrame, _data: u8) -> Result<Val> {
+pub(crate) fn return_fn(vm: &mut Vm, frame: StackFrame) -> Result<Val> {
     let stack_start = frame.stack_start;
     let last = vm.stack.len().checked_sub(1).ok_or(Error::StackUnderflow)?;
     match vm.stack_frames.pop() {
@@ -295,13 +282,14 @@ pub(crate) fn return_fn(vm: &mut Vm, frame: StackFrame, _data: u8) -> Result<Val
         Some(mut prev_frame) => {
             vm.stack.swap(stack_start, last);
             vm.stack.truncate(stack_start + 1);
-            let (fn_ptr, data) = prev_frame.advance_instruction_fn();
-            become fn_ptr(vm, prev_frame, data);
+            prev_frame.instruction_idx += 1;
+            let fn_ptr = prev_frame.func.instruction(prev_frame.instruction_idx);
+            become fn_ptr(vm, prev_frame);
         }
     }
 }
 
-pub(crate) fn binop_add_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Result<Val> {
+pub(crate) fn binop_add_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     let a = vm.stack.pop().ok_or(Error::StackUnderflow)?;
     let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
     let Val::Int(av) = a else {
@@ -317,11 +305,12 @@ pub(crate) fn binop_add_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Res
         });
     };
     *tv += av;
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn binop_sub_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Result<Val> {
+pub(crate) fn binop_sub_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     let a = vm.stack.pop().ok_or(Error::StackUnderflow)?;
     let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
     let Val::Int(av) = a else {
@@ -337,11 +326,12 @@ pub(crate) fn binop_sub_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Res
         });
     };
     *tv -= av;
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn binop_mul_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Result<Val> {
+pub(crate) fn binop_mul_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     let a = vm.stack.pop().ok_or(Error::StackUnderflow)?;
     let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
     let Val::Int(av) = a else {
@@ -357,11 +347,12 @@ pub(crate) fn binop_mul_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Res
         });
     };
     *tv *= av;
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn binop_div_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Result<Val> {
+pub(crate) fn binop_div_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     let a = vm.stack.pop().ok_or(Error::StackUnderflow)?;
     let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
     let Val::Int(av) = a else {
@@ -380,27 +371,30 @@ pub(crate) fn binop_div_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Res
         return Err(Error::DivideByZero);
     }
     *tv /= av;
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn binop_eq_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Result<Val> {
+pub(crate) fn binop_eq_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     let a = vm.stack.pop().ok_or(Error::StackUnderflow)?;
     let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
     *top = Val::Bool(a == *top);
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn binop_not_eq_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Result<Val> {
+pub(crate) fn binop_not_eq_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     let a = vm.stack.pop().ok_or(Error::StackUnderflow)?;
     let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
     *top = Val::Bool(a != *top);
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn binop_lt_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Result<Val> {
+pub(crate) fn binop_lt_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     let a = vm.stack.pop().ok_or(Error::StackUnderflow)?;
     let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
     let Val::Int(av) = a else {
@@ -416,11 +410,12 @@ pub(crate) fn binop_lt_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Resu
         });
     };
     *top = Val::Bool(*tv < av);
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn binop_le_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Result<Val> {
+pub(crate) fn binop_le_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     let a = vm.stack.pop().ok_or(Error::StackUnderflow)?;
     let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
     let Val::Int(av) = a else {
@@ -436,11 +431,12 @@ pub(crate) fn binop_le_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Resu
         });
     };
     *top = Val::Bool(*tv <= av);
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn binop_gt_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Result<Val> {
+pub(crate) fn binop_gt_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     let a = vm.stack.pop().ok_or(Error::StackUnderflow)?;
     let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
     let Val::Int(av) = a else {
@@ -456,11 +452,12 @@ pub(crate) fn binop_gt_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Resu
         });
     };
     *top = Val::Bool(*tv > av);
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn binop_ge_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Result<Val> {
+pub(crate) fn binop_ge_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     let a = vm.stack.pop().ok_or(Error::StackUnderflow)?;
     let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
     let Val::Int(av) = a else {
@@ -476,11 +473,13 @@ pub(crate) fn binop_ge_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Resu
         });
     };
     *top = Val::Bool(*tv >= av);
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn add_n_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<Val> {
+pub(crate) fn add_n_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
+    let data = frame.func.instruction_data(frame.instruction_idx);
     let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
     match top {
         Val::Int(x) => *x += data as i8 as i64,
@@ -491,11 +490,13 @@ pub(crate) fn add_n_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<V
             });
         }
     }
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn less_than_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<Val> {
+pub(crate) fn less_than_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
+    let data = frame.func.instruction_data(frame.instruction_idx);
     let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
     match top {
         Val::Int(x) => {
@@ -509,11 +510,13 @@ pub(crate) fn less_than_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Resu
             });
         }
     }
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn greater_than_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<Val> {
+pub(crate) fn greater_than_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
+    let data = frame.func.instruction_data(frame.instruction_idx);
     let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
     match top {
         Val::Int(x) => {
@@ -527,11 +530,13 @@ pub(crate) fn greater_than_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> R
             });
         }
     }
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn equal_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<Val> {
+pub(crate) fn equal_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
+    let data = frame.func.instruction_data(frame.instruction_idx);
     let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
     match top {
         Val::Int(x) => {
@@ -545,11 +550,12 @@ pub(crate) fn equal_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<V
             });
         }
     }
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn string_length_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) -> Result<Val> {
+pub(crate) fn string_length_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
     match top {
         Val::String(s) => *top = Val::Int(s.len() as i64),
@@ -561,16 +567,19 @@ pub(crate) fn string_length_fn(vm: &mut Vm, mut frame: StackFrame, _data: u8) ->
             });
         }
     }
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
-pub(crate) fn dup_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<Val> {
+pub(crate) fn dup_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
+    let data = frame.func.instruction_data(frame.instruction_idx);
     let val = vm.stack.last().ok_or(Error::StackUnderflow)?.clone();
     vm.stack
         .extend(std::iter::repeat_with(|| val.clone()).take(data as usize));
-    let (fn_ptr, data) = frame.advance_instruction_fn();
-    become fn_ptr(vm, frame, data);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
 /// Register and return a recursive Fibonacci function.
