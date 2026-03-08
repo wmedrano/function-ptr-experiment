@@ -3,8 +3,8 @@ use std::rc::Rc;
 
 use compact_str::CompactString;
 
-use crate::func::Func;
 use crate::Result;
+use crate::func::Func;
 
 /// A native Rust function callable from the VM.
 #[derive(Clone)]
@@ -134,8 +134,8 @@ impl Symbol {
 
     pub(crate) fn as_str(&self) -> &str {
         let len = self.0.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-        // SAFETY: `self.0` is always initialized from a valid `&str`, so its bytes are valid UTF-8.
-        unsafe { std::str::from_utf8_unchecked(&self.0[..len]) }
+        // This could probably be an unsafe check.
+        str::from_utf8(&self.0[0..len]).unwrap()
     }
 }
 
