@@ -20,9 +20,16 @@ impl Func {
         for instruction in instructions {
             let (func, d) = match instruction {
                 Instruction::Eval(n) => (eval_fn as InstructionFn, n),
+                Instruction::EvalRecursive(0) => (eval_recursive_const_fn::<0> as InstructionFn, 0),
+                Instruction::EvalRecursive(1) => (eval_recursive_const_fn::<1> as InstructionFn, 0),
+                Instruction::EvalRecursive(2) => (eval_recursive_const_fn::<2> as InstructionFn, 0),
                 Instruction::EvalRecursive(n) => (eval_recursive_fn as InstructionFn, n),
                 Instruction::LoadInt(x) => (load_int_fn as InstructionFn, x as u8),
                 Instruction::LoadConst(idx) => (load_const_fn as InstructionFn, idx),
+                Instruction::LoadLocal(0) => (load_local_const_fn::<0> as InstructionFn, 0),
+                Instruction::LoadLocal(1) => (load_local_const_fn::<1> as InstructionFn, 0),
+                Instruction::LoadLocal(2) => (load_local_const_fn::<2> as InstructionFn, 0),
+                Instruction::LoadLocal(3) => (load_local_const_fn::<3> as InstructionFn, 0),
                 Instruction::LoadLocal(idx) => (load_local_fn as InstructionFn, idx),
                 Instruction::SetLocal(idx) => (set_local_fn as InstructionFn, idx),
                 Instruction::JumpIf(n) => (jump_if_fn as InstructionFn, n as u8),
@@ -43,12 +50,21 @@ impl Func {
                     };
                     (f, 0)
                 }
+                Instruction::AddN(-2) => (add_n_const_fn::<-2> as InstructionFn, 0),
+                Instruction::AddN(-1) => (add_n_const_fn::<-1> as InstructionFn, 0),
+                Instruction::AddN(0) => (add_n_const_fn::<0> as InstructionFn, 0),
+                Instruction::AddN(1) => (add_n_const_fn::<1> as InstructionFn, 0),
+                Instruction::AddN(2) => (add_n_const_fn::<2> as InstructionFn, 0),
                 Instruction::AddN(n) => (add_n_fn as InstructionFn, n as u8),
+                Instruction::LessThan(0) => (less_than_const_fn::<0> as InstructionFn, 0),
+                Instruction::LessThan(1) => (less_than_const_fn::<1> as InstructionFn, 0),
+                Instruction::LessThan(2) => (less_than_const_fn::<2> as InstructionFn, 0),
                 Instruction::LessThan(n) => (less_than_fn as InstructionFn, n as u8),
                 Instruction::GreaterThan(n) => (greater_than_fn as InstructionFn, n as u8),
                 Instruction::Equal(n) => (equal_fn as InstructionFn, n as u8),
                 Instruction::StringLength => (string_length_fn as InstructionFn, 0),
                 Instruction::Dup(n) => (dup_fn as InstructionFn, n),
+                Instruction::Nop => (nop_fn as InstructionFn, 0),
             };
             funcs.push(func);
             data.push(d);
@@ -154,6 +170,8 @@ pub enum Instruction {
     StringLength,
     /// Duplicate the top-of-stack value.
     Dup(u8),
+    /// Do nothing.
+    Nop,
 }
 
 pub(crate) fn eval_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
@@ -197,6 +215,26 @@ pub(crate) fn eval_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     }
 }
 
+pub(crate) fn eval_recursive_const_fn<const N: i64>(vm: &mut Vm, frame: StackFrame) -> Result<Val> {
+    let arg_count = N as usize;
+    let func = frame.func.clone();
+    let fn_ptr = func.instruction(0);
+    let stack_start = vm.stack.len() - arg_count;
+    if func.args() != arg_count {
+        return Err(Error::WrongArgCount {
+            expected: func.args(),
+            got: arg_count,
+        });
+    }
+    vm.stack_frames.push(frame);
+    let new_frame = StackFrame {
+        stack_start,
+        instruction_idx: 0,
+        func,
+    };
+    become fn_ptr(vm, new_frame);
+}
+
 pub(crate) fn eval_recursive_fn(vm: &mut Vm, frame: StackFrame) -> Result<Val> {
     let arg_count = frame.func.instruction_data(frame.instruction_idx) as usize;
     let func = frame.func.clone();
@@ -234,6 +272,14 @@ pub(crate) fn load_const_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     become fn_ptr(vm, frame);
 }
 
+pub(crate) fn load_local_const_fn<const N: i64>(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
+    let val = vm.stack[frame.stack_start + N as usize].clone();
+    vm.stack.push(val);
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
+}
+
 pub(crate) fn load_local_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     let data = frame.func.instruction_data(frame.instruction_idx);
     let val = vm.stack[frame.stack_start + data as usize].clone();
@@ -255,19 +301,21 @@ pub(crate) fn set_local_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
 pub(crate) fn jump_if_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     let data = frame.func.instruction_data(frame.instruction_idx);
     let is_truthy = vm.stack.pop().ok_or(Error::StackUnderflow)?.is_truthy();
-    if is_truthy {
-        frame.instruction_idx = (frame.instruction_idx as isize + data as i8 as isize) as usize;
-    }
-    frame.instruction_idx += 1;
-    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    let idx = if is_truthy {
+        (1 + frame.instruction_idx as isize + data as i8 as isize) as usize
+    } else {
+        frame.instruction_idx + 1
+    };
+    frame.instruction_idx = idx;
+    let fn_ptr = frame.func.instruction(idx);
     become fn_ptr(vm, frame);
 }
 
 pub(crate) fn jump_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     let data = frame.func.instruction_data(frame.instruction_idx);
-    frame.instruction_idx = (frame.instruction_idx as isize + data as i8 as isize) as usize;
-    frame.instruction_idx += 1;
-    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    let idx = 1 + (frame.instruction_idx as isize + data as i8 as isize) as usize;
+    frame.instruction_idx = idx;
+    let fn_ptr = frame.func.instruction(idx);
     become fn_ptr(vm, frame);
 }
 
@@ -478,11 +526,46 @@ pub(crate) fn binop_ge_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     become fn_ptr(vm, frame);
 }
 
+pub(crate) fn add_n_const_fn<const N: i64>(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
+    let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
+    match top {
+        Val::Int(x) => *x += N,
+        _ => {
+            return Err(Error::WrongType {
+                expected: "Int",
+                got: top.type_name(),
+            });
+        }
+    }
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
+}
+
 pub(crate) fn add_n_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     let data = frame.func.instruction_data(frame.instruction_idx);
     let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
     match top {
         Val::Int(x) => *x += data as i8 as i64,
+        _ => {
+            return Err(Error::WrongType {
+                expected: "Int",
+                got: top.type_name(),
+            });
+        }
+    }
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
+}
+
+pub(crate) fn less_than_const_fn<const N: i64>(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
+    let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
+    match top {
+        Val::Int(x) => {
+            let result = *x < N;
+            *top = result.into();
+        }
         _ => {
             return Err(Error::WrongType {
                 expected: "Int",
@@ -577,6 +660,12 @@ pub(crate) fn dup_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     let val = vm.stack.last().ok_or(Error::StackUnderflow)?.clone();
     vm.stack
         .extend(std::iter::repeat_with(|| val.clone()).take(data as usize));
+    frame.instruction_idx += 1;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
+}
+
+pub(crate) fn nop_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
     frame.instruction_idx += 1;
     let fn_ptr = frame.func.instruction(frame.instruction_idx);
     become fn_ptr(vm, frame);
