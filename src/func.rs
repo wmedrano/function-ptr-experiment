@@ -15,10 +15,43 @@ impl Func {
         instructions: impl IntoIterator<Item = Instruction>,
         constants: Vec<Val>,
     ) -> Func {
+        let instructions: Vec<Instruction> = instructions.into_iter().collect();
         let mut funcs = Vec::new();
         let mut data = Vec::new();
-        for instruction in instructions {
-            let (func, d) = match instruction {
+        let mut i = 0;
+        while i < instructions.len() {
+            // Pattern: LoadLocal(0), LessThan(2), JumpIf(n) -> combined fast path + 2 nops.
+            // The combined instruction sits at the LoadLocal(0) slot, so the jump offset
+            // must be increased by 2 to reach the same target as the original JumpIf.
+            if let (
+                Some(Instruction::LoadLocal(0)),
+                Some(Instruction::LessThan(2)),
+                Some(Instruction::JumpIf(n)),
+            ) = (
+                instructions.get(i),
+                instructions.get(i + 1),
+                instructions.get(i + 2),
+            ) {
+                funcs.extend_from_slice(&[
+                    jump_if_local0_lt2_fn as InstructionFn,
+                    nop_fn as InstructionFn,
+                    nop_fn as InstructionFn,
+                ]);
+                data.extend_from_slice(&[n.wrapping_add(2) as u8, 0, 0]);
+                i += 3;
+                continue;
+            }
+            if let (Some(Instruction::Binop(Binop::Add)), Some(Instruction::Binop(Binop::Add))) =
+                (instructions.get(i), instructions.get(i + 1))
+            {
+                funcs.push(triop_add_fn as InstructionFn);
+                data.push(0);
+                funcs.push(nop_fn as InstructionFn);
+                data.push(0);
+                i += 2;
+                continue;
+            }
+            let (func, d) = match instructions[i] {
                 Instruction::Eval(n) => (eval_fn as InstructionFn, n),
                 Instruction::EvalRecursive(0) => (eval_recursive_const_fn::<0> as InstructionFn, 0),
                 Instruction::EvalRecursive(1) => (eval_recursive_const_fn::<1> as InstructionFn, 0),
@@ -68,6 +101,7 @@ impl Func {
             };
             funcs.push(func);
             data.push(d);
+            i += 1;
         }
         Func(Rc::new(FuncInner {
             arg_count,
@@ -335,6 +369,34 @@ pub(crate) fn return_fn(vm: &mut Vm, frame: StackFrame) -> Result<Val> {
             become fn_ptr(vm, prev_frame);
         }
     }
+}
+
+pub(crate) fn triop_add_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
+    let a = vm.stack.pop().ok_or(Error::StackUnderflow)?;
+    let b = vm.stack.pop().ok_or(Error::StackUnderflow)?;
+    let top = vm.stack.last_mut().ok_or(Error::StackUnderflow)?;
+    let Val::Int(av) = a else {
+        return Err(Error::WrongType {
+            expected: "Int",
+            got: a.type_name(),
+        });
+    };
+    let Val::Int(bv) = a else {
+        return Err(Error::WrongType {
+            expected: "Int",
+            got: b.type_name(),
+        });
+    };
+    let Val::Int(tv) = top else {
+        return Err(Error::WrongType {
+            expected: "Int",
+            got: top.type_name(),
+        });
+    };
+    *tv += bv + av;
+    frame.instruction_idx += 2;
+    let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
 }
 
 pub(crate) fn binop_add_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
@@ -662,6 +724,27 @@ pub(crate) fn dup_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
         .extend(std::iter::repeat_with(|| val.clone()).take(data as usize));
     frame.instruction_idx += 1;
     let fn_ptr = frame.func.instruction(frame.instruction_idx);
+    become fn_ptr(vm, frame);
+}
+
+pub(crate) fn jump_if_local0_lt2_fn(vm: &mut Vm, mut frame: StackFrame) -> Result<Val> {
+    let data = frame.func.instruction_data(frame.instruction_idx);
+    let local0 = match &vm.stack[frame.stack_start] {
+        Val::Int(x) => *x,
+        top => {
+            return Err(Error::WrongType {
+                expected: "Int",
+                got: top.type_name(),
+            });
+        }
+    };
+    let idx = if local0 < 2 {
+        (1 + frame.instruction_idx as isize + data as i8 as isize) as usize
+    } else {
+        frame.instruction_idx + 1
+    };
+    frame.instruction_idx = idx;
+    let fn_ptr = frame.func.instruction(idx);
     become fn_ptr(vm, frame);
 }
 
