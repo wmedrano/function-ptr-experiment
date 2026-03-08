@@ -1,6 +1,7 @@
 #![feature(explicit_tail_calls)]
 mod func;
 mod val;
+pub use func::make_fib;
 pub use func::{Binop, Func, Instruction};
 pub use val::{Symbol, Val};
 
@@ -28,22 +29,24 @@ pub enum Error {
 #[derive(Debug)]
 pub struct Vm {
     pub(crate) stack: Vec<Val>,
-    stack_frames: Vec<StackFrame>,
+    pub(crate) stack_frames: Vec<StackFrame>,
 }
 
 #[derive(Debug)]
 pub struct StackFrame {
-    stack_start: usize,
-    instruction_idx: usize,
-    func: Func,
+    pub(crate) stack_start: usize,
+    pub(crate) instruction_idx: usize,
+    pub(crate) func: Func,
 }
 
 impl StackFrame {
     #[inline(always)]
-    fn advance_instruction(&mut self) -> Instruction {
-        let instruction = self.func.instructions()[self.instruction_idx];
+    pub(crate) fn advance_instruction_fn(
+        &mut self,
+    ) -> (fn(&mut Vm, StackFrame, u8) -> Result<Val>, u8) {
+        let (func, data) = self.func.instruction_fn(self.instruction_idx);
         self.instruction_idx += 1;
-        instruction
+        (func, data)
     }
 }
 
@@ -98,291 +101,9 @@ impl Vm {
 
     fn run(&mut self) -> Result<Val> {
         let mut current_frame = self.stack_frames.pop().ok_or(Error::StackUnderflow)?;
-        let instruction = current_frame.advance_instruction();
-        self.run_instruction(instruction, current_frame)
+        let (fn_ptr, data) = current_frame.advance_instruction_fn();
+        fn_ptr(self, current_frame, data)
     }
-
-    fn run_instruction(
-        &mut self,
-        instruction: Instruction,
-        mut current_frame: StackFrame,
-    ) -> Result<Val> {
-        match instruction {
-            Instruction::Eval(n) => {
-                let (func, arg_count) = if n < 0 {
-                    let func = current_frame.func.clone();
-                    let arg_count = (n as u8 & 0x7F) as usize;
-                    (func, arg_count)
-                } else {
-                    let arg_count = n as usize;
-                    match self.stack.pop().ok_or(Error::StackUnderflow)? {
-                        Val::Func(func) => (func, arg_count),
-                        Val::NativeFunc(nf) => {
-                            if self.stack.len() < arg_count {
-                                return Err(Error::StackUnderflow);
-                            }
-                            let stack_start = self.stack.len() - arg_count;
-                            let result = (nf.0)(&self.stack[stack_start..])?;
-                            self.stack.truncate(stack_start);
-                            self.stack.push(result);
-                            let instruction =
-                                current_frame.func.instructions()[current_frame.instruction_idx];
-                            current_frame.instruction_idx += 1;
-                            become self.run_instruction(instruction, current_frame);
-                        }
-                        v => {
-                            return Err(Error::WrongType {
-                                expected: "Func",
-                                got: v.type_name(),
-                            });
-                        }
-                    }
-                };
-                let instruction = func.instructions()[0];
-                let stack_start = self.stack.len() - arg_count;
-                if func.args() != arg_count {
-                    return Err(Error::WrongArgCount {
-                        expected: func.args(),
-                        got: arg_count,
-                    });
-                }
-                self.stack_frames.push(current_frame);
-                become self.run_instruction(
-                    instruction,
-                    StackFrame {
-                        stack_start,
-                        instruction_idx: 1,
-                        func,
-                    },
-                );
-            }
-            Instruction::LoadInt(x) => {
-                self.stack.push((x as i64).into());
-                let instruction = current_frame.advance_instruction();
-                become self.run_instruction(instruction, current_frame);
-            }
-            Instruction::LoadConst(idx) => {
-                let val = current_frame.func.constants()[idx as usize].clone();
-                self.stack.push(val);
-                let instruction = current_frame.advance_instruction();
-                become self.run_instruction(instruction, current_frame);
-            }
-            Instruction::LoadLocal(idx) => {
-                let val = self.stack[current_frame.stack_start + idx as usize].clone();
-                self.stack.push(val);
-                let instruction = current_frame.advance_instruction();
-                become self.run_instruction(instruction, current_frame);
-            }
-            Instruction::SetLocal(idx) => {
-                let val = self.stack.pop().ok_or(Error::StackUnderflow)?;
-                self.stack[current_frame.stack_start + idx as usize] = val;
-                let instruction = current_frame.advance_instruction();
-                become self.run_instruction(instruction, current_frame);
-            }
-            Instruction::JumpIf(n) => {
-                let is_truthy = self.stack.pop().ok_or(Error::StackUnderflow)?.is_truthy();
-                if is_truthy {
-                    current_frame.instruction_idx =
-                        (current_frame.instruction_idx as isize + n as isize) as usize;
-                }
-                let instruction = current_frame.advance_instruction();
-                become self.run_instruction(instruction, current_frame);
-            }
-            Instruction::Jump(n) => {
-                current_frame.instruction_idx =
-                    (current_frame.instruction_idx as isize + n as isize) as usize;
-                let instruction = current_frame.advance_instruction();
-                become self.run_instruction(instruction, current_frame);
-            }
-            Instruction::Return => {
-                let stack_start = current_frame.stack_start;
-                let last = self
-                    .stack
-                    .len()
-                    .checked_sub(1)
-                    .ok_or(Error::StackUnderflow)?;
-                match self.stack_frames.pop() {
-                    None => {
-                        let val = self.stack.pop().ok_or(Error::StackUnderflow)?;
-                        return Ok(val);
-                    }
-                    Some(frame) => {
-                        self.stack.swap(stack_start, last);
-                        self.stack.truncate(stack_start + 1);
-                        current_frame = frame;
-                    }
-                }
-                let instruction = current_frame.advance_instruction();
-                become self.run_instruction(instruction, current_frame);
-            }
-            Instruction::Binop(op) => {
-                let a = self.stack.pop().ok_or(Error::StackUnderflow)?;
-                let top = self.stack.last_mut().ok_or(Error::StackUnderflow)?;
-                apply_binop(op, a, top)?;
-                let instruction = current_frame.advance_instruction();
-                become self.run_instruction(instruction, current_frame);
-            }
-            Instruction::AddN(n) => {
-                let top = self.stack.last_mut().ok_or(Error::StackUnderflow)?;
-                match top {
-                    Val::Int(x) => *x += n as i64,
-                    _ => {
-                        return Err(Error::WrongType {
-                            expected: "Int",
-                            got: top.type_name(),
-                        });
-                    }
-                }
-                let instruction = current_frame.advance_instruction();
-                become self.run_instruction(instruction, current_frame);
-            }
-            Instruction::LessThan(n) => {
-                let top = self.stack.last_mut().ok_or(Error::StackUnderflow)?;
-                match top {
-                    Val::Int(x) => {
-                        let is_less_than = *x < n as i64;
-                        *top = is_less_than.into();
-                    }
-                    _ => {
-                        return Err(Error::WrongType {
-                            expected: "Int",
-                            got: top.type_name(),
-                        });
-                    }
-                }
-                let instruction = current_frame.advance_instruction();
-                become self.run_instruction(instruction, current_frame);
-            }
-            Instruction::GreaterThan(n) => {
-                let top = self.stack.last_mut().ok_or(Error::StackUnderflow)?;
-                match top {
-                    Val::Int(x) => {
-                        let is_greater_than = *x > n as i64;
-                        *top = is_greater_than.into();
-                    }
-                    _ => {
-                        return Err(Error::WrongType {
-                            expected: "Int",
-                            got: top.type_name(),
-                        });
-                    }
-                }
-                let instruction = current_frame.advance_instruction();
-                become self.run_instruction(instruction, current_frame);
-            }
-            Instruction::Equal(n) => {
-                let top = self.stack.last_mut().ok_or(Error::StackUnderflow)?;
-                match top {
-                    Val::Int(x) => {
-                        let is_equal = *x == n as i64;
-                        *top = is_equal.into();
-                    }
-                    _ => {
-                        return Err(Error::WrongType {
-                            expected: "Int",
-                            got: top.type_name(),
-                        });
-                    }
-                }
-                let instruction = current_frame.advance_instruction();
-                become self.run_instruction(instruction, current_frame);
-            }
-            Instruction::StringLength => {
-                let top = self.stack.last_mut().ok_or(Error::StackUnderflow)?;
-                match top {
-                    Val::String(s) => *top = Val::Int(s.len() as i64),
-                    Val::Symbol(s) => *top = Val::Int(s.as_str().len() as i64),
-                    _ => {
-                        return Err(Error::WrongType {
-                            expected: "Str or Symbol",
-                            got: top.type_name(),
-                        });
-                    }
-                }
-                let instruction = current_frame.advance_instruction();
-                become self.run_instruction(instruction, current_frame);
-            }
-            Instruction::Dup(n) => {
-                let val = self.stack.last().ok_or(Error::StackUnderflow)?.clone();
-                self.stack
-                    .extend(std::iter::repeat_with(|| val.clone()).take(n as usize));
-                let instruction = current_frame.advance_instruction();
-                become self.run_instruction(instruction, current_frame);
-            }
-        }
-    }
-}
-
-fn apply_binop(op: Binop, a: Val, top: &mut Val) -> Result<()> {
-    match op {
-        Binop::Eq => {
-            let res = &a == top;
-            *top = Val::Bool(res);
-        }
-        Binop::NotEq => {
-            let res = &a != top;
-            *top = Val::Bool(res);
-        }
-        _ => {
-            let Val::Int(av) = a else {
-                return Err(Error::WrongType {
-                    expected: "Int",
-                    got: a.type_name(),
-                });
-            };
-            let Val::Int(tv) = top else {
-                return Err(Error::WrongType {
-                    expected: "Int",
-                    got: top.type_name(),
-                });
-            };
-            match op {
-                Binop::Add => *tv += av,
-                Binop::Sub => *tv -= av,
-                Binop::Mul => *tv *= av,
-                Binop::Div => {
-                    if av == 0 {
-                        return Err(Error::DivideByZero);
-                    }
-                    *tv /= av;
-                }
-                Binop::Lt => *top = Val::Bool(*tv < av),
-                Binop::Le => *top = Val::Bool(*tv <= av),
-                Binop::Gt => *top = Val::Bool(*tv > av),
-                Binop::Ge => *top = Val::Bool(*tv >= av),
-                Binop::Eq | Binop::NotEq => unreachable!(),
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Register and return a recursive Fibonacci function.
-///
-/// Implements: `fib(n) = if n < 2 { n } else { fib(n-1) + fib(n-2) }`
-pub fn make_fib() -> Val {
-    // Stack on entry: [n]
-    let load_n = Instruction::LoadLocal(0);
-    Func::new(
-        1,
-        vec![
-            load_n,                         //  0: [n, n]
-            Instruction::LessThan(2),       //  1: [n, n<2]
-            Instruction::JumpIf(8),         //  2: [n]  -- if n<2 jump to 11
-            load_n,                         //  3: [n, n]
-            Instruction::AddN(-1),          //  4: [n, n-1]
-            Instruction::Eval(-127),        //  5: [n, fib(n-1)]
-            load_n,                         //  6: [n, fib(n-1), n]
-            Instruction::AddN(-2),          //  7: [n, fib(n-1), n-2]
-            Instruction::Eval(-127),        //  8: [n, fib(n-1), fib(n-2)]
-            Instruction::Binop(Binop::Add), //  9: [n, fib(n-1)+fib(n-2)]
-            Instruction::Return,            // 10: return fib(n-1)+fib(n-2)
-            load_n,                         // 11: [n, n]  -- base case (n < 2)
-            Instruction::Return,            // 12: return n
-        ],
-        vec![],
-    )
-    .into()
 }
 
 pub fn make_adder() -> Val {
