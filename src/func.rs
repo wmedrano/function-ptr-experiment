@@ -10,77 +10,15 @@ impl Func {
     /// Create a new function with the given argument count, instructions, and constants.
     pub fn new(
         arg_count: usize,
-        instructions: impl IntoIterator<Item = Instruction>,
+        instructions: impl Clone + IntoIterator<Item = Instruction>,
         constants: Vec<Val>,
     ) -> Func {
-        let mut funcs = Vec::new();
-        let mut data = Vec::new();
-        for instruction in instructions {
-            let (func, d) = match instruction {
-                Instruction::Eval(n) => (eval_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>, n),
-                Instruction::EvalRecursive(n) => (
-                    eval_recursive_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    n,
-                ),
-                Instruction::LoadInt(x) => (
-                    load_int_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    x as u8,
-                ),
-                Instruction::LoadConst(idx) => (
-                    load_const_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    idx,
-                ),
-                Instruction::LoadLocal(idx) => (
-                    load_local_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    idx,
-                ),
-                Instruction::SetLocal(idx) => (
-                    set_local_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    idx,
-                ),
-                Instruction::JumpIf(n) => (
-                    jump_if_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    n as u8,
-                ),
-                Instruction::Jump(n) => (
-                    jump_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    n as u8,
-                ),
-                Instruction::Return => (return_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>, 0),
-                Instruction::Binop(op) => {
-                    let f: fn(&mut Vm, StackFrame, u8) -> Result<Val> = match op {
-                        Binop::Add => binop_add_fn,
-                        Binop::Sub => binop_sub_fn,
-                        Binop::Mul => binop_mul_fn,
-                        Binop::Div => binop_div_fn,
-                        Binop::Eq => binop_eq_fn,
-                        Binop::NotEq => binop_not_eq_fn,
-                        Binop::Lt => binop_lt_fn,
-                        Binop::Le => binop_le_fn,
-                        Binop::Gt => binop_gt_fn,
-                        Binop::Ge => binop_ge_fn,
-                    };
-                    (f, 0)
-                }
-                Instruction::AddN(n) => (add_n_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>, n as u8),
-                Instruction::LessThan(n) => (less_than_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>, n as u8),
-                Instruction::GreaterThan(n) => (
-                    greater_than_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    n as u8,
-                ),
-                Instruction::Equal(n) => (
-                    equal_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    n as u8,
-                ),
-                Instruction::StringLength => (
-                    string_length_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>,
-                    0,
-                ),
-                Instruction::Dup(n) => (dup_fn as fn(&mut Vm, StackFrame, u8) -> Result<Val>, n),
-            };
-            funcs.push(func);
-            data.push(d);
-        }
+        let funcs = instructions
+            .clone()
+            .into_iter()
+            .map(|i| i.to_func())
+            .collect();
+        let data = instructions.into_iter().map(|i| i.to_data()).collect();
         Func(Rc::new(FuncInner {
             arg_count,
             funcs,
@@ -180,6 +118,91 @@ pub enum Instruction {
     StringLength,
     /// Duplicate the top-of-stack value.
     Dup(u8),
+}
+
+type InstructionFn = fn(&mut Vm, StackFrame, u8) -> Result<Val>;
+
+const FUNCS: [InstructionFn; 25] = [
+    eval_fn,           // 0
+    eval_recursive_fn, // 1
+    load_int_fn,       // 2
+    load_const_fn,     // 3
+    load_local_fn,     // 4
+    set_local_fn,      // 5
+    jump_if_fn,        // 6
+    jump_fn,           // 7
+    return_fn,         // 8
+    binop_add_fn,      // 9
+    binop_sub_fn,      // 10
+    binop_mul_fn,      // 11
+    binop_div_fn,      // 12
+    binop_eq_fn,       // 13
+    binop_not_eq_fn,   // 14
+    binop_lt_fn,       // 15
+    binop_le_fn,       // 16
+    binop_gt_fn,       // 17
+    binop_ge_fn,       // 18
+    add_n_fn,          // 19
+    less_than_fn,      // 20
+    greater_than_fn,   // 21
+    equal_fn,          // 22
+    string_length_fn,  // 23
+    dup_fn,            // 24
+];
+
+impl Instruction {
+    pub fn to_func(self) -> InstructionFn {
+        match self {
+            Instruction::Eval(_) => FUNCS[0],
+            Instruction::EvalRecursive(_) => FUNCS[1],
+            Instruction::LoadInt(_) => FUNCS[2],
+            Instruction::LoadConst(_) => FUNCS[3],
+            Instruction::LoadLocal(_) => FUNCS[4],
+            Instruction::SetLocal(_) => FUNCS[5],
+            Instruction::JumpIf(_) => FUNCS[6],
+            Instruction::Jump(_) => FUNCS[7],
+            Instruction::Return => FUNCS[8],
+            Instruction::Binop(op) => match op {
+                Binop::Add => FUNCS[9],
+                Binop::Sub => FUNCS[10],
+                Binop::Mul => FUNCS[11],
+                Binop::Div => FUNCS[12],
+                Binop::Eq => FUNCS[13],
+                Binop::NotEq => FUNCS[14],
+                Binop::Lt => FUNCS[15],
+                Binop::Le => FUNCS[16],
+                Binop::Gt => FUNCS[17],
+                Binop::Ge => FUNCS[18],
+            },
+            Instruction::AddN(_) => FUNCS[19],
+            Instruction::LessThan(_) => FUNCS[20],
+            Instruction::GreaterThan(_) => FUNCS[21],
+            Instruction::Equal(_) => FUNCS[22],
+            Instruction::StringLength => FUNCS[23],
+            Instruction::Dup(_) => FUNCS[24],
+        }
+    }
+
+    pub fn to_data(self) -> u8 {
+        match self {
+            Instruction::Eval(n) => n,
+            Instruction::EvalRecursive(n) => n,
+            Instruction::LoadInt(x) => x as u8,
+            Instruction::LoadConst(idx) => idx,
+            Instruction::LoadLocal(idx) => idx,
+            Instruction::SetLocal(idx) => idx,
+            Instruction::JumpIf(n) => n as u8,
+            Instruction::Jump(n) => n as u8,
+            Instruction::Return => 0,
+            Instruction::Binop(_) => 0,
+            Instruction::AddN(n) => n as u8,
+            Instruction::LessThan(n) => n as u8,
+            Instruction::GreaterThan(n) => n as u8,
+            Instruction::Equal(n) => n as u8,
+            Instruction::StringLength => 0,
+            Instruction::Dup(n) => n,
+        }
+    }
 }
 
 pub(crate) fn eval_fn(vm: &mut Vm, mut frame: StackFrame, data: u8) -> Result<Val> {
